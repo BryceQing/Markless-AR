@@ -14,6 +14,9 @@ from objloader_simple import *
 MIN_MATCHES = 10 
 
 
+
+
+# TODO refactor the whole .py file
 def main():
     """
     This functions loads the target surface image,
@@ -27,54 +30,70 @@ def main():
     
     
     orb = cv2.ORB_create() # create ORB keypoint detector
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True) # create BFMatcher object based on hamming distance  
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck = True) # create BFMatcher object based on hamming distance  
     model = cv2.imread('NaturalMark/refer.png', 0) # load the reference surface that will be searched in the video stream
     kp_model, des_model = orb.detectAndCompute(model, None) # Compute model keypoints and its descriptors 
     obj = OBJ('fox.obj', swapyz=True) # Load 3D model from OBJ file
     cap = cv2.VideoCapture(0)# init video capture
 
     while True:
-        try:
-            _, frame = cap.read()# read the current frame
-            if not _: return 
-            kp_frame, des_frame = orb.detectAndCompute(frame, None)# find and draw the keypoints of the frame
-            matches = bf.match(des_model, des_frame)# match frame descriptors with model descriptors
-            matches = sorted(matches, key=lambda x: x.distance)# sort them in the order of their distance, lower distance better the match
-
-            if len(matches) > MIN_MATCHES:
-                print('find')
-                # differenciate between source points and destination points
-                src_pts = np.float32([kp_model[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-                dst_pts = np.float32([kp_frame[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-                # compute Homography
-                homography, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, mask = 5.0) # compute Homography if enough matches are found
-                
-                
-                
-                if homography is not None:
-                    try:
-                        projection = projection_matrix(camera_parameters, homography)  # obtain 3D projection matrix from homography matrix and camera parameters
-                        frame = render(frame, obj, projection, model, False)
-                    except:
-                        pass
-            else:
-                pass
+        
+        
+        _, frame = cap.read()# read the current frame
+        if not _: return 
+        kp1, des1 = orb.detectAndCompute(frame, None)# find and draw the keypoints of the frame
+        matches = bf.match(des_model, des1)# match frame descriptors with model descriptors
+        matches = sorted(matches, key=lambda x: x.distance)# sort them in the order of their distance, lower distance better the match
+        h, w = frame.shape[:2]
+        
+        
+    
+        if len(matches) > MIN_MATCHES:
             
-            res = cv2.drawMatches(model, kp_model, frame, kp_frame, matches[:MIN_MATCHES], 0, flags = 2)# draw most matches points.
-            cv2.imshow('frame', res)
+            # differenciate between source points and destination points
+            src_pts = np.float32([kp_model[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp1[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+            # compute the first Homography : roughtM
+            roughM, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, mask = 5.0) # compute Homography if enough matches are found
+            res = cv2.drawMatches(model, kp_model, frame, kp1, matches[:MIN_MATCHES], 0, flags = 2)# draw most matches points.  
             
+            
+            if roughM is not None:
+                
+                # FIXME add warp homograph
+                warp = cv2.warpPerspective(model, roughM, (w, h), cv2.WARP_INVERSE_MAP + cv2.INTER_CUBIC)
+                
+                
+                # Use warp to matches, now the warp is the reference.
+                kp2, des2 = orb.detectAndCompute(warp, None)
+                matches = bf.match(des2, des1)
+                matches = sorted(matches, key=lambda x: x.distance)# sort them in the order of their distance, lower distance better the match
+                        
+                src_pts = np.float32([kp2[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+                dst_pts = np.float32([kp1[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+                # compute the second Homography: resultM
+                refinedM, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, mask = 5.0) # compute Homography if enough matches are found
+                resultM = np.matmul(roughM, refinedM)
+                
+                res = cv2.drawMatches(frame, kp1, warp, kp2, matches[:MIN_MATCHES], 0, flags = 2)# draw most matches points.
+                cv2.imshow('frame', res)    
+                    
+                
+                beforeProjection = projection_matrix(camera_parameters, roughM)
+                projection = projection_matrix(camera_parameters, resultM)  # obtain 3D projection matrix from homography matrix and camera parameters
+                
+                # BeforeProjection is green
+                # AfterProjection is purple
+                frame = render(frame, obj, beforeProjection, model, [0, 255, 0])
+                frame = render(frame, obj, projection, model, False)             
+                cv2.imshow('Warp matches Frame', frame)
+                
+    
             keyBoard = cv2.waitKey(20)
             if keyBoard  == ord('q'): break
-            elif keyBoard  == ord('='): 
-                for  i in range(10):
-                    temp = cv2.drawMatches(model, kp_model, frame, kp_frame, [matches[i]], 0, flags = 2)# draw most matches points.
-                    cv2.waitKey(0)
-                    cv2.imshow('frame', temp)
-                
-                # project_another(camera_parameters, homography)
-                print('Debug author result:', projection)
-        except:
-            pass
+                   
+        # except:
+        #     pass
             
     cap.release()
     cv2.destroyAllWindows()
@@ -100,17 +119,12 @@ def render(img, obj, projection, model, color = False):
         if color is False:
             cv2.fillConvexPoly(img, imgpts, (137, 27, 211))
         else:
-            color = hex_to_rgb(face[-1])
-            color = color[::-1]  # reverse
+            # color = hex_to_rgb(face[-1])
+            # color = color[::-1]  # reverse
             cv2.fillConvexPoly(img, imgpts, color)
-
     return img
 
 
-    
-    
-    
-    
 
 def projection_matrix(camera_parameters, homography):
     """
@@ -146,8 +160,6 @@ def hex_to_rgb(hex_color):
     hex_color = hex_color.lstrip('#')
     h_len = len(hex_color)
     return tuple(int(hex_color[i:i + h_len // 3], 16) for i in range(0, h_len, h_len // 3))
-
-
 
 
 # Command line argument parsing
